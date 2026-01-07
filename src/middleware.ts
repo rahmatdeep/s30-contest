@@ -44,7 +44,7 @@ export function authMiddleware(
   } catch (err: any) {
     return res
       .status(401)
-      .json({ success: false, error: "Invalid or expired token" });
+      .json({ success: false, error: "Unauthorized, token missing or invalid" });
   }
 }
 

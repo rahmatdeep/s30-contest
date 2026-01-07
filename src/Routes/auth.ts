@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import { User } from "../db";
 import { UserZodSchema, LoginZodSchema } from "../types";
 import authMiddleware from "../middleware";
+import { success } from "zod";
 
 const router: Router = Router();
 
@@ -12,7 +13,7 @@ router.post("/signup", async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({
       success: false,
-      error: parsed.error.format(),
+      error: "Invalid request schema",
     });
   }
 
@@ -25,6 +26,20 @@ router.post("/signup", async (req, res) => {
         success: false,
         error: "Email already exists",
       });
+    }
+
+    if (data.supervisorId) {
+      const supervisor = await User.findOne({ _id: data.supervisorId });
+      if (!supervisor) {
+        return res
+          .status(404)
+          .json({ success: false, error: "Supervisor not found" });
+      }
+      if (supervisor.role !== "supervisor") {
+        return res
+          .status(400)
+          .json({ success: false, error: "Invalid supervisor role" });
+      }
     }
 
     const hashed = await bcrypt.hash(data.password, 10);
@@ -59,7 +74,7 @@ router.post("/login", async (req, res) => {
   if (!parsed.success) {
     return res
       .status(400)
-      .json({ success: false, error: parsed.error.format() });
+      .json({ success: false, error: "Invalid request schema" });
   }
 
   const { email, password } = parsed.data;
@@ -67,14 +82,15 @@ router.post("/login", async (req, res) => {
   try {
     const user = await User.findOne({ email });
     if (!user) {
-      return res.status(404).json({ success: false, error: "User not found" });
+      return res.status(401).json({ success: false, error: "Unauthorized, token missing or invalid" });
     }
 
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) {
-      return res
-        .status(401)
-        .json({ success: false, error: "Invalid credentials" });
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized, token missing or invalid",
+      });
     }
 
     const secret = process.env.JWT_SECRET || "dev_secret";

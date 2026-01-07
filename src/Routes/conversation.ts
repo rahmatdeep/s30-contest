@@ -6,9 +6,7 @@ import { ConversationCreateSchema, ConversationAssignSchema } from "../types";
 
 const router = Router();
 
-// In-memory messages store for assigned conversations (conversationId -> messages[])
-// Each message: { senderId, senderRole, content, createdAt }
-const inMemoryMessages = new Map<
+export const inMemoryMessages = new Map<
   string,
   Array<{
     senderId: string;
@@ -23,7 +21,7 @@ router.post("/", authMiddleware, async (req, res) => {
   if (role !== "candidate") {
     return res
       .status(403)
-      .json({ success: false, error: "Forbidden: candidates only" });
+      .json({ success: false, error: "Forbidden, insufficient permissions" });
   }
 
   const parsed = ConversationCreateSchema.safeParse(req.body);
@@ -49,10 +47,16 @@ router.post("/", authMiddleware, async (req, res) => {
     }
 
     const supervisorUser = await User.findById(supervisorId);
-    if (!supervisorUser || supervisorUser.role !== "supervisor") {
+    if (!supervisorUser) {
+      return res
+        .status(404)
+        .json({ success: false, error: "Supervisor not found" });
+    }
+
+    if (supervisorUser.role !== "supervisor") {
       return res
         .status(400)
-        .json({ success: false, error: "Supervisor not found" });
+        .json({ success: false, error: "Invalid supervisor role" });
     }
 
     const conv = new Conversation({
@@ -107,10 +111,18 @@ router.post("/:id/assign", authMiddleware, async (req, res) => {
 
   try {
     const conv = await Conversation.findById(convId);
-    if (!conv)
+    if (!conv) {
       return res
         .status(404)
         .json({ success: false, error: "Conversation not found" });
+    }
+
+    if (conv.status === "closed") {
+      return res.status(400).json({
+        success: false,
+        error: "Conversation already closed",
+      });
+    }
 
     if (conv.supervisorId.toString() !== supervisorId) {
       return res
@@ -119,14 +131,17 @@ router.post("/:id/assign", authMiddleware, async (req, res) => {
     }
 
     const agent = await User.findById(agentId);
-    if (!agent)
+    if (!agent) {
       return res.status(404).json({ success: false, error: "Agent not found" });
+    }
 
-    if (
-      agent.role !== "agent" ||
-      !agent.supervisorId ||
-      agent.supervisorId.toString() !== supervisorId
-    ) {
+    if (agent.role !== "agent") {
+      return res
+        .status(400)
+        .json({ success: false, error: "Invalid agent role" });
+    }
+
+    if (!agent.supervisorId || agent.supervisorId.toString() !== supervisorId) {
       return res
         .status(403)
         .json({ success: false, error: "Agent doesn't belong to you" });
@@ -171,20 +186,16 @@ router.get("/:id", authMiddleware, async (req, res) => {
     const userId = req.user?.userId;
 
     if (role !== "admin") {
-      if (role === "supervisor") {
-        if (conv.supervisorId.toString() !== userId) {
-          return res.status(403).json({ success: false, error: "Forbidden" });
-        }
-      } else if (role === "agent") {
-        if (!conv.agentId || conv.agentId.toString() !== userId) {
-          return res.status(403).json({ success: false, error: "Forbidden" });
-        }
-      } else if (role === "candidate") {
-        if (conv.candidateId.toString() !== userId) {
-          return res.status(403).json({ success: false, error: "Forbidden" });
-        }
-      } else {
-        return res.status(403).json({ success: false, error: "Forbidden" });
+      const hasAccess =
+        (role === "supervisor" && conv.supervisorId.toString() === userId) ||
+        (role === "agent" && conv.agentId?.toString() === userId) ||
+        (role === "candidate" && conv.candidateId.toString() === userId);
+
+      if (!hasAccess) {
+        return res.status(403).json({
+          success: false,
+          error: "Forbidden, insufficient permissions",
+        });
       }
     }
 
@@ -194,7 +205,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
       content: string;
       createdAt: Date;
     }> = [];
-    if (conv.status === "assigned") {
+    if (conv.status === "assigned" || conv.status === "open") {
       messages = inMemoryMessages.get(convId) || [];
     } else if (conv.status === "closed") {
       const persisted = await Message.find({ conversationId: conv._id })
@@ -206,8 +217,6 @@ router.get("/:id", authMiddleware, async (req, res) => {
         content: m.content,
         createdAt: m.createdAt,
       }));
-    } else {
-      messages = [];
     }
 
     return res.status(200).json({
@@ -223,6 +232,58 @@ router.get("/:id", authMiddleware, async (req, res) => {
     });
   } catch (err: any) {
     console.error("Get conversation error:", err);
+    return res
+      .status(500)
+      .json({ success: false, error: "Internal server error" });
+  }
+});
+
+router.post("/:id/close", authMiddleware, async (req, res) => {
+  const role = req.user?.role;
+  const userId = req.user?.userId;
+
+  if (role !== "admin" && role !== "supervisor") {
+    return res.status(403).json({ success: false, error: "Forbidden" });
+  }
+
+  const convId = req.params.id;
+  if (!mongoose.isValidObjectId(convId)) {
+    return res
+      .status(400)
+      .json({ success: false, error: "Invalid conversation id" });
+  }
+
+  try {
+    const conv = await Conversation.findById(convId);
+    if (!conv)
+      return res
+        .status(404)
+        .json({ success: false, error: "Conversation not found" });
+
+    if (role === "supervisor" && conv.supervisorId.toString() !== userId) {
+      return res
+        .status(403)
+        .json({ success: false, error: "Forbidden, insufficient permissions" });
+    }
+
+    if (conv.status !== "open") {
+      return res
+        .status(400)
+        .json({ success: false, error: "Conversation already closed" });
+    }
+
+    conv.status = "closed";
+    await conv.save();
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        conversationId: conv._id.toString(),
+        status: conv.status,
+      },
+    });
+  } catch (err: any) {
+    console.error("Close conversation error:", err);
     return res
       .status(500)
       .json({ success: false, error: "Internal server error" });
